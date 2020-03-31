@@ -7,78 +7,84 @@ extern crate sample;
 use crossbeam_channel::bounded;
 use std::io;
 use std::str::FromStr;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::cell::Cell;
 
 use sample::{signal, Signal};
 use sample::frame::Frame;
 
-struct FMSynth {
-    sample_rate: f64,
-    freq: f64,
-    m_ratio: f64,
-    c_ratio: f64,
-    m_index: f64,
-    // modulator: Box<dyn Signal<Frame = sample::frame::Mono<f64>>>,
-    carrier: Box<dyn Signal<Frame = sample::frame::Mono<f64>>>,
-    amp: f64,
-}
+// struct FMSynth {
+//     sample_rate: f64,
+//     freq: Arc<Mutex<f64>>,
+//     m_ratio: f64,
+//     c_ratio: f64,
+//     m_index: f64,
+//     // modulator: Box<dyn Signal<Frame = sample::frame::Mono<f64>>>,
+//     carrier: Box<dyn Signal<Frame = sample::frame::Mono<f64>> + Send + Sync>,
+//     amp: f64,
+// }
 
-impl FMSynth {
-    fn new(sample_rate: f64, freq: f64, amp: f64, m_ratio: f64, c_ratio: f64, m_index: f64) -> Self {
+// impl FMSynth {
+//     fn new(sample_rate: f64, freq: f64, amp: f64, m_ratio: f64, c_ratio: f64, m_index: f64) -> Self {
+//         let sync_freq = Arc::new(Mutex::new(freq));
+//         let freq_sig1 = signal::gen(move || [*sync_freq.lock().unwrap()]);
+//         let freq_sig2 = signal::gen(move || [*sync_freq.lock().unwrap()]);
+//         let freq_sig3 = signal::gen(move || [*sync_freq.lock().unwrap()]);
+//         let index_sig = signal::gen(move || [m_index]);
+//         let mut mod_freq = signal::gen(move || [m_ratio]).mul_amp(freq_sig1);
+//         let mut modulator = signal::rate(sample_rate as f64).hz(mod_freq).sine().mul_amp(freq_sig2).mul_amp(index_sig);
+//         let mut car_freq = signal::gen(move || [c_ratio]).mul_amp(freq_sig3).add_amp(modulator);
+//         let mut carrier = signal::rate(sample_rate as f64).hz(car_freq).sine();
 
-        let freq_sig = signal::gen(move || [freq]);
-        let freq_sig2 = signal::gen(move || [freq]);
-        let freq_sig3 = signal::gen(move || [freq]);
-        let index_sig = signal::gen(move || [m_index]);
-        let mut mod_freq = signal::gen(move || [m_ratio]).mul_amp(freq_sig);
-        let mut modulator = signal::rate(sample_rate as f64).hz(mod_freq).sine().mul_amp(freq_sig2).mul_amp(index_sig);
-        let mut car_freq = signal::gen(move || [c_ratio]).mul_amp(freq_sig3).add_amp(modulator);
-        let mut carrier = signal::rate(sample_rate as f64).hz(car_freq).sine();
-
-        let mut synth = FMSynth {
-            sample_rate,
-            freq,
-            m_ratio,
-            c_ratio,
-            m_index,
-            // modulator: Box::new(modulator), // cannot be used here because the modulator is moved
-            carrier: Box::new(carrier),
-            amp,
-        };
-        synth
-    }
-    fn next_stereo(&mut self) -> [f64; 2] {
-        let sample = self.carrier.next();
+//         let mut synth = FMSynth {
+//             sample_rate,
+//             freq: sync_freq,
+//             m_ratio,
+//             c_ratio,
+//             m_index,
+//             // modulator: Box::new(modulator), // cannot be used here because the modulator is moved
+//             carrier: Box::new(carrier),
+//             amp,
+//         };
+//         synth
+//     }
+//     fn next_stereo(&mut self) -> [f64; 2] {
+//         let sample = self.carrier.next();
         
-        [sample[0], sample[0]]
-    }
-    fn set_freq(&mut self, freq: f64) {
-        self.freq = freq;
-    }
-    fn control_rate_update(&mut self) {
-        self.amp *= 0.98;
-    }
-    fn trigger(&mut self, freq: f64) {
-        // Set the new frequency
-        self.freq = freq;
-        // Setting the amplitude triggers an attack
-        self.amp = 0.5;
-        // Reset all phases
-        // self.lfo_phase = 0.0; // You may or may not want to reset the lfo phase based on how you use it
-    }
-}
+//         [sample[0], sample[0]]
+//     }
+//     fn set_freq(&mut self, freq: f64) {
+//         *self.freq.lock().unwrap() = freq;
+//     }
+//     fn control_rate_update(&mut self) {
+//         self.amp *= 0.98;
+//     }
+//     fn trigger(&mut self, freq: f64) {
+//         // Set the new frequency
+//         *self.freq.lock().unwrap() = freq;
+//         // Setting the amplitude triggers an attack
+//         self.amp = 0.5;
+//         // Reset all phases
+//         // self.lfo_phase = 0.0; // You may or may not want to reset the lfo phase based on how you use it
+//     }
+// }
 
 fn main() {
     // 1. open a client
     let (client, _status) =
-        jack::Client::new("rust_jack_sine", jack::ClientOptions::NO_START_SERVER).unwrap();
+        jack::Client::new("rust_jack_fm", jack::ClientOptions::NO_START_SERVER).unwrap();
 
     // 2. register port
     let mut out_port_l = client
-        .register_port("sine_out_l", jack::AudioOut::default())
+        .register_port("out_l", jack::AudioOut::default())
         .unwrap();
     let mut out_port_r = client
-        .register_port("sine_out_r", jack::AudioOut::default())
+        .register_port("out_r", jack::AudioOut::default())
         .unwrap();
+
+    // Get the system ports
+    let ports = client.ports(Some("system:playback_.*"), None, jack::PortFlags::empty());
 
     // 3. define process callback handler
     let mut frequency = 220.0;
@@ -88,17 +94,21 @@ fn main() {
     let (tx, rx) = bounded::<[f64; 4]>(1_000_000);
 
     // FMSynth setup
-    let mut fm_synth = FMSynth::new(sample_rate as f64, frequency, 1.0, 2.0, 1.0, 4.0);
+    // let mut fm_synth = FMSynth::new(sample_rate as f64, frequency, 1.0, 2.0, 1.0, 4.0);
     let m_ratio = 2.5;
     let c_ratio = 1.0;
     let m_index = 6.0;
     // Question: How can I use one freq_sig that I can later change to influence all the places where it should be?
     // If I try to do that now I get a "use of moved value" error
-    let freq_sig = signal::gen(move || [frequency]);
-    let freq_sig2 = signal::gen(move || [frequency]);
-    let freq_sig3 = signal::gen(move || [frequency]);
+    let sync_freq1 = Arc::new(Mutex::new(frequency));
+    let sync_freq2 = Arc::clone(&sync_freq1);
+    let sync_freq3 = Arc::clone(&sync_freq1);
+    let freq_param = Arc::clone(&sync_freq1);
+    let freq_sig1 = signal::gen(move || [*sync_freq1.lock().unwrap()]);
+    let freq_sig2 = signal::gen(move || [*sync_freq2.lock().unwrap()]);
+    let freq_sig3 = signal::gen(move || [*sync_freq3.lock().unwrap()]);
     let index_sig = signal::gen(move || [m_index]);
-    let mut mod_freq = signal::gen(move || [m_ratio]).mul_amp(freq_sig);
+    let mut mod_freq = signal::gen(move || [m_ratio]).mul_amp(freq_sig1);
     let mut modulator = signal::rate(sample_rate as f64).hz(mod_freq).sine().mul_amp(freq_sig2).mul_amp(index_sig);
     let mut car_freq = signal::gen(move || [c_ratio]).mul_amp(freq_sig3).add_amp(modulator);
     let mut carrier = signal::rate(sample_rate as f64).hz(car_freq).sine();
@@ -126,6 +136,7 @@ fn main() {
             while let Ok(f) = rx.try_recv() {
                 time = 0.0;
                 frequency = f[0];
+                *freq_param.lock().unwrap() = f[0];
                 // Question: How can I change the parameters of the synth here, e.g. frequency?
                 // fm_synth.set_freq(f[0]);
                 // fm_synth.c_ratio = f[1];
@@ -137,7 +148,7 @@ fn main() {
             // Write output
             for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
                 let frame = carrier.next();
-                // let struct_frame = fm_synth.next_stereo();
+                // let frame = fm_synth.next_stereo();
                 *l = frame[0] as f32;
                 *r = frame[0] as f32;
                 time += frame_t;
@@ -163,6 +174,19 @@ fn main() {
     // 4. activate the client
     let active_client = client.activate_async((), process).unwrap();
     // processing starts here
+
+    // Connect the client to the system outputs automatically.
+    // It seems like this has to be done after the client is activated, doing it just after creating the ports doesn't work.
+    // TODO: Get the local port names automatically from the client or by putting the client and port names in variables.
+    let res = active_client.as_client().connect_ports_by_name("rust_jack_fm:out_l", &ports[0]);
+    match res {
+        Ok(_) => (),
+        Err(e) => println!("Unable to connect to port {} with error {}", ports[0], e),
+    }
+    match active_client.as_client().connect_ports_by_name("rust_jack_fm:out_r", &ports[1]) {
+        Ok(_) => (),
+        Err(e) => println!("Unable to connect to port {} with error {}", ports[1], e),
+    }
 
     // 5. wait or do some processing while your handler is running in real time.
     println!("Enter freq c_ratio m_ratio lfo_freq");

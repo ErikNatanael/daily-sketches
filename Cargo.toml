@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+	"fm_synth_dsp-chain",
 	"fm_synth_sample",
 	"fm_synth",
 	"20200326",
