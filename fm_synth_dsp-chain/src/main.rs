@@ -18,6 +18,7 @@ type Output = f32;
 type Phase = f64;
 type Frequency = f64;
 type Volume = f32;
+type Add = f32;
 
 const CHANNELS: usize = 2;
 const FRAMES: u32 = 64;
@@ -115,9 +116,9 @@ fn main() {
 
     const A5_HZ: Frequency = 440.0;
     // Connect a few oscillators to the synth.
-    let (_, oscillator_a) = graph.add_input(DspNode::Oscillator(0.0, A5_HZ, 0.2), synth);
-    let (_, oscillator_b) = graph.add_input(DspNode::Oscillator(0.0, A5_HZ * 4.0 / 3.0, 0.1), synth);
-    let (_, oscillator_c) = graph.add_input(DspNode::Oscillator(0.0, A5_HZ * 5.0 / 6.0, 0.15), synth);
+    let (_, oscillator_a) = graph.add_input(DspNode::Oscillator(0.0, A5_HZ, 0.0, 0.2), synth);
+    let (_, oscillator_b) = graph.add_input(DspNode::Oscillator(0.0, A5_HZ * 4.0 / 3.0, 0.0, 0.1), synth);
+    let (_, oscillator_c) = graph.add_input(DspNode::Oscillator(0.0, A5_HZ * 5.0 / 6.0, 0.0, 0.15), synth);
 
     // If adding a connection between two nodes would create a cycle, Graph will return an Err.
     if let Err(err) = graph.add_connection(synth, oscillator_a) {
@@ -148,7 +149,7 @@ fn main() {
                 // Traverse inputs or outputs of a node with the following pattern.
                 let mut inputs = graph.inputs(synth);
                 while let Some(input_idx) = inputs.next_node(&graph) {
-                    if let DspNode::Oscillator(_, ref mut pitch, _) = graph[input_idx] {
+                    if let DspNode::Oscillator(_, ref mut pitch, _, _) = graph[input_idx] {
                         // Pitch down our oscillators for fun.
                         *pitch = frequency;
                     }
@@ -281,7 +282,7 @@ enum DspNode {
     Synth,
     /// Oscillator will be our generator type of node, meaning that we will override
     /// the way it provides audio via its `audio_requested` method.
-    Oscillator(Phase, Frequency, Volume),
+    Oscillator(Phase, Frequency, Add, Volume),
 }
 
 impl Node<[Output; CHANNELS]> for DspNode {
@@ -289,9 +290,9 @@ impl Node<[Output; CHANNELS]> for DspNode {
     fn audio_requested(&mut self, buffer: &mut [[Output; CHANNELS]], sample_hz: f64) {
         match *self {
             DspNode::Synth => (),
-            DspNode::Oscillator(ref mut phase, frequency, volume) => {
+            DspNode::Oscillator(ref mut phase, frequency, add, volume) => {
                 dsp::slice::map_in_place(buffer, |_| {
-                    let val = sine_wave(*phase, volume);
+                    let val = sine_wave(*phase, add, volume);
                     *phase += frequency / sample_hz;
                     Frame::from_fn(|_| val)
                 });
@@ -301,7 +302,7 @@ impl Node<[Output; CHANNELS]> for DspNode {
 }
 
 /// Return a sine wave for the given phase.
-fn sine_wave<S: Sample>(phase: Phase, volume: Volume) -> S
+fn sine_wave<S: Sample>(phase: Phase, add: Add, volume: Volume) -> S
 where
     S: Sample + FromSample<f32>,
 {
